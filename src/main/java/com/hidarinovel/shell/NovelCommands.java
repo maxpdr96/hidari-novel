@@ -622,7 +622,8 @@ public class NovelCommands {
                  value = "Download and export chapters to PDF or EPUB")
     public String download(
             @ShellOption(help = "First chapter number (global)") int from,
-            @ShellOption(help = "Last chapter number (global)")  int to,
+            @ShellOption(help = "Last chapter number (global, defaults to --from)",
+                         defaultValue = ShellOption.NULL) Integer to,
             @ShellOption(help = "Output format: pdf or epub", defaultValue = "epub")
                     String format,
             @ShellOption(help = "Combine all chapters into a single file",
@@ -631,7 +632,8 @@ public class NovelCommands {
                          defaultValue = "") String output) {
 
         if (service.getCurrentNovel().isEmpty()) return noNovelSelected();
-        if (from > to) return s("--from must be ≤ --to.", YELLOW);
+        int actualTo = (to != null) ? to : from;
+        if (from > actualTo) return s("--from must be ≤ --to.", YELLOW);
 
         ExportFormat fmt;
         try {
@@ -640,10 +642,10 @@ public class NovelCommands {
             return s(e.getMessage(), RED);
         }
 
-        List<Chapter> range = service.getRange(from, to);
+        List<Chapter> range = service.getRange(from, actualTo);
         if (range.isEmpty()) {
             return s("Nenhum capítulo encontrado no intervalo %d–%d. Use 'chapters' para ver os números disponíveis."
-                    .formatted(from, to), YELLOW);
+                    .formatted(from, actualTo), YELLOW);
         }
 
         String novelTitle = service.getCurrentNovel().get().title();
@@ -654,7 +656,7 @@ public class NovelCommands {
         Path outputDir = output.isBlank() ? null : Path.of(output);
 
         try {
-            List<Path> created = service.download(from, to, fmt, combine, outputDir,
+            List<Path> created = service.download(from, actualTo, fmt, combine, outputDir,
                     this::printProgressBar);
 
             System.out.println(); // finaliza linha da barra de progresso
