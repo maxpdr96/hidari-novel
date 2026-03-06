@@ -38,12 +38,11 @@ public class CentralNovelScraper implements SiteScraperAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(CentralNovelScraper.class);
 
-    static final String BASE_URL = "https://centralnovel.com";
-    private static final String USER_AGENT =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-    private static final int TIMEOUT_MS = 20_000;
+    static final String BASE_URL    = "https://centralnovel.com";
+    private static final int TIMEOUT_MS      = 20_000;
     private static final int MAX_SEARCH_PAGES = 5;
+
+    private final UserAgentProvider userAgentProvider;
 
     // Link text: "Vol. 1 Cap. 5" or "Vol. 1 Cap. Pról." etc.
     private static final Pattern LINK_VOL_CHAP_PAT = Pattern.compile(
@@ -70,6 +69,10 @@ public class CentralNovelScraper implements SiteScraperAdapter {
     private final HttpClient httpClient = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
+
+    public CentralNovelScraper(UserAgentProvider userAgentProvider) {
+        this.userAgentProvider = userAgentProvider;
+    }
 
     @Override public String siteId()      { return "centralnovel"; }
     @Override public String displayName() { return "Central Novel"; }
@@ -440,7 +443,7 @@ public class CentralNovelScraper implements SiteScraperAdapter {
 
     private Document fetch(String url) throws IOException {
         return Jsoup.connect(url)
-                .userAgent(USER_AGENT)
+                .userAgent(userAgentProvider.next())
                 .referrer(BASE_URL)
                 .timeout(TIMEOUT_MS)
                 .get();
@@ -449,7 +452,7 @@ public class CentralNovelScraper implements SiteScraperAdapter {
     private byte[] downloadBytes(String url, String referer)
             throws IOException, InterruptedException {
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", userAgentProvider.next())
                 .header("Referer", referer)
                 .build();
         HttpResponse<byte[]> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofByteArray());

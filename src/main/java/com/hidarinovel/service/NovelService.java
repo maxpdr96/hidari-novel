@@ -18,7 +18,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
-import java.util.function.Consumer;
 
 /**
  * Central service managing interactive session state and orchestrating
@@ -143,6 +142,21 @@ public class NovelService {
                 .toList();
     }
 
+    public Optional<Chapter> getChapter(int globalNumber) {
+        return allChapters.stream()
+                .filter(c -> c.globalNumber() == globalNumber)
+                .findFirst();
+    }
+
+    public ChapterContent fetchChapterContent(int globalNumber) throws IOException {
+        if (currentScraper == null)
+            throw new IllegalStateException("Nenhuma novel selecionada.");
+        Chapter ch = getChapter(globalNumber)
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "Capítulo %d não encontrado. Use 'chapters' para ver os disponíveis.".formatted(globalNumber)));
+        return currentScraper.getChapterContent(ch);
+    }
+
     public Optional<Volume> getVolume(int number) {
         return volumes.stream().filter(v -> v.number() == number).findFirst();
     }
@@ -198,7 +212,7 @@ public class NovelService {
     // ── Download & export ─────────────────────────────────────────────────────
 
     public List<Path> download(int from, int to, ExportFormat format, boolean combine,
-                                Path outputDir, Consumer<String> progress)
+                                Path outputDir, ProgressCallback progress)
             throws IOException {
 
         if (currentNovel == null || currentScraper == null)
@@ -221,7 +235,7 @@ public class NovelService {
     }
 
     public Path downloadVolume(Volume vol, ExportFormat format, Path outputDir,
-                                Consumer<String> progress) throws IOException {
+                                ProgressCallback progress) throws IOException {
         if (currentNovel == null || currentScraper == null)
             throw new IllegalStateException("No novel selected.");
 
@@ -251,16 +265,15 @@ public class NovelService {
     // ── Private helpers ───────────────────────────────────────────────────────
 
     private List<ChapterContent> fetchContents(List<Chapter> chapters,
-                                               Consumer<String> progress) {
+                                               ProgressCallback progress) {
         List<ChapterContent> contents = new ArrayList<>();
         for (Chapter ch : chapters) {
-            progress.accept("  [%d/%d] %s".formatted(
-                    contents.size() + 1, chapters.size(), ch.shortLabel()));
+            int current = contents.size() + 1;
+            progress.update(current, chapters.size(), ch.shortLabel());
             try {
                 contents.add(currentScraper.getChapterContent(ch));
             } catch (IOException e) {
                 log.error("Failed to fetch {}: {}", ch.url(), e.getMessage());
-                progress.accept("  ✗ Failed: " + ch.shortLabel());
             }
         }
         return contents;

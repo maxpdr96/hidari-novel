@@ -7,8 +7,13 @@ import com.hidarinovel.store.FavoritesStore;
 import org.jline.reader.EndOfFileException;
 import org.jline.reader.LineReader;
 import org.jline.reader.UserInterruptException;
+import org.jline.terminal.Attributes;
+import org.jline.terminal.Terminal;
 import org.jline.utils.AttributedStringBuilder;
 import org.jline.utils.AttributedStyle;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.shell.standard.ShellComponent;
 import org.springframework.shell.standard.ShellMethod;
@@ -19,6 +24,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -27,12 +33,12 @@ import java.util.List;
 @ShellComponent
 public class NovelCommands {
 
-    private static final AttributedStyle BOLD   = AttributedStyle.DEFAULT.bold();
-    private static final AttributedStyle DIM    = AttributedStyle.DEFAULT.faint();
-    private static final AttributedStyle CYAN   = AttributedStyle.DEFAULT.foreground(AttributedStyle.CYAN);
-    private static final AttributedStyle GREEN  = AttributedStyle.DEFAULT.foreground(AttributedStyle.GREEN);
-    private static final AttributedStyle YELLOW = AttributedStyle.DEFAULT.foreground(AttributedStyle.YELLOW);
-    private static final AttributedStyle RED    = AttributedStyle.DEFAULT.foreground(AttributedStyle.RED);
+    private static final AttributedStyle BOLD    = AttributedStyle.DEFAULT.bold();
+    private static final AttributedStyle DIM     = AttributedStyle.DEFAULT.faint();
+    private static final AttributedStyle CYAN    = AttributedStyle.DEFAULT.foreground(AttributedStyle.CYAN);
+    private static final AttributedStyle GREEN   = AttributedStyle.DEFAULT.foreground(AttributedStyle.GREEN);
+    private static final AttributedStyle YELLOW  = AttributedStyle.DEFAULT.foreground(AttributedStyle.YELLOW);
+    private static final AttributedStyle RED     = AttributedStyle.DEFAULT.foreground(AttributedStyle.RED);
     private static final AttributedStyle MAGENTA = AttributedStyle.DEFAULT.foreground(AttributedStyle.MAGENTA);
 
     private static final DateTimeFormatter DATE_FMT = DateTimeFormatter
@@ -40,10 +46,14 @@ public class NovelCommands {
 
     private final NovelService service;
     private final LineReader   lineReader;
+    private final Terminal     terminal;
 
-    public NovelCommands(NovelService service, @Lazy LineReader lineReader) {
+    public NovelCommands(NovelService service,
+                         @Lazy LineReader lineReader,
+                         @Lazy Terminal terminal) {
         this.service    = service;
         this.lineReader = lineReader;
+        this.terminal   = terminal;
     }
 
     // ── search ────────────────────────────────────────────────────────────────
@@ -62,10 +72,10 @@ public class NovelCommands {
 
         String query = String.join(" ", words).trim();
         SearchFilter filter = new SearchFilter(
-                genre.isBlank() ? null : genre,
+                genre.isBlank()  ? null : genre,
                 origin.isBlank() ? null : origin,
                 status.isBlank() ? null : status,
-                order.isBlank() ? null : order
+                order.isBlank()  ? null : order
         );
 
         boolean hasFilters = !genre.isBlank() || !origin.isBlank()
@@ -86,10 +96,7 @@ public class NovelCommands {
             return s("Busca falhou: " + e.getMessage(), RED);
         }
 
-        if (results.isEmpty()) {
-            return s("Nenhuma novel encontrada.", YELLOW);
-        }
-
+        if (results.isEmpty()) return s("Nenhuma novel encontrada.", YELLOW);
         return displayAndSelect(results);
     }
 
@@ -145,9 +152,8 @@ public class NovelCommands {
             for (LatestRelease r : releases) {
                 sb.append(s("  " + r.novelTitle(), BOLD))
                   .append(s("  →  " + r.chapterTitle(), DIM));
-                if (!r.timestamp().isBlank()) {
+                if (!r.timestamp().isBlank())
                     sb.append(s("  (%s)".formatted(formatTimestamp(r.timestamp())), DIM));
-                }
                 sb.append('\n');
             }
 
@@ -171,13 +177,12 @@ public class NovelCommands {
 
         if (args.length == 0) return favoritesUsage();
 
-        String action = args[0].toLowerCase(); 
+        String action = args[0].toLowerCase();
         FavoritesStore store = service.getFavoritesStore();
 
         return switch (action) {
             case "add" -> {
-                if (service.getCurrentNovel().isEmpty())
-                    yield noNovelSelected();
+                if (service.getCurrentNovel().isEmpty()) yield noNovelSelected();
                 if (service.addCurrentToFavorites()) {
                     yield s("✓ ", GREEN)
                             + service.getCurrentNovel().get().title()
@@ -198,8 +203,7 @@ public class NovelCommands {
 
                 for (int i = 0; i < entries.size(); i++) {
                     FavoriteEntry e = entries.get(i);
-                    sb.append(s("%3d. ".formatted(i + 1), BOLD))
-                      .append(e.title());
+                    sb.append(s("%3d. ".formatted(i + 1), BOLD)).append(e.title());
                     if (!e.author().isBlank())
                         sb.append(s(" por " + e.author(), DIM));
                     if (e.lastKnownChapters() > 0)
@@ -264,6 +268,152 @@ public class NovelCommands {
                 + s("  remove N ", BOLD) + s("— remove o favorito N", DIM);
     }
 
+    // ── Library ───────────────────────────────────────────────────────────────
+
+    @ShellMethod(key = "library", value = "Manage your novel library (list, add, remove, sync [N])")
+    public String library(
+            @ShellOption(arity = -1, help = "Action: list, add, remove <N>, sync [N]")
+                    String[] args) {
+
+        if (args.length == 0) return libraryUsage();
+
+        String action = args[0].toLowerCase();
+        FavoritesStore store = service.getFavoritesStore();
+
+        return switch (action) {
+            case "list", "ls" -> {
+                List<FavoriteEntry> entries = store.list();
+                if (entries.isEmpty())
+                    yield s("Biblioteca vazia. Use ", YELLOW)
+                            + s("library add", BOLD)
+                            + s(" com uma novel selecionada.", YELLOW);
+
+                var sb = new StringBuilder();
+                sb.append(s("Biblioteca (%d novel(s)):\n".formatted(entries.size()), BOLD));
+                sb.append(s("─".repeat(62) + "\n", DIM));
+
+                for (int i = 0; i < entries.size(); i++) {
+                    FavoriteEntry e = entries.get(i);
+                    sb.append(s("%3d. ".formatted(i + 1), BOLD)).append(e.title());
+                    if (!e.author().isBlank())
+                        sb.append(s(" por " + e.author(), DIM));
+                    if (e.lastKnownChapters() > 0)
+                        sb.append(s("  [%d caps]".formatted(e.lastKnownChapters()), DIM));
+                    if (e.lastDownloadedChapter() > 0)
+                        sb.append(s("  ↓%d".formatted(e.lastDownloadedChapter()), GREEN));
+                    sb.append(s("  · " + siteName(e.siteId()), MAGENTA));
+                    sb.append('\n');
+                }
+                sb.append('\n');
+                sb.append(s("Use ", DIM))
+                  .append(s("update --favorite N", BOLD))
+                  .append(s(" para baixar capítulos novos.", DIM));
+                yield sb.toString().stripTrailing();
+            }
+            case "add" -> {
+                if (service.getCurrentNovel().isEmpty()) yield noNovelSelected();
+                if (service.addCurrentToFavorites()) {
+                    yield s("✓ ", GREEN)
+                            + service.getCurrentNovel().get().title()
+                            + s(" adicionada à biblioteca.", GREEN);
+                }
+                yield s("Erro ao adicionar.", RED);
+            }
+            case "remove", "rm" -> {
+                if (args.length < 2) yield s("Use: library remove <número>", YELLOW);
+                int idx;
+                try { idx = Integer.parseInt(args[1]); }
+                catch (NumberFormatException e) { yield s("Número inválido.", YELLOW); }
+
+                var entryOpt = store.get(idx);
+                if (entryOpt.isEmpty())
+                    yield s("Item #%d não encontrado.".formatted(idx), YELLOW);
+
+                store.remove(entryOpt.get().slug());
+                yield s("✓ ", GREEN) + entryOpt.get().title()
+                        + s(" removida da biblioteca.", GREEN);
+            }
+            case "sync" -> {
+                // sync N — verifica apenas um item
+                if (args.length >= 2) {
+                    int idx;
+                    try { idx = Integer.parseInt(args[1]); }
+                    catch (NumberFormatException e) { yield s("Número inválido.", YELLOW); }
+
+                    var entryOpt = store.get(idx);
+                    if (entryOpt.isEmpty())
+                        yield s("Item #%d não encontrado.".formatted(idx), YELLOW);
+
+                    FavoriteEntry e = entryOpt.get();
+                    print(s("Verificando: %s...".formatted(e.title()), CYAN));
+                    try {
+                        int newChaps = service.checkForUpdates(e);
+                        if (newChaps > 0) {
+                            yield s("✦ ", MAGENTA) + s(e.title(), BOLD)
+                                    + s("  +%d novos capítulos. Use ".formatted(newChaps), GREEN)
+                                    + s("update --favorite %d".formatted(idx), BOLD)
+                                    + s(" para baixar.", GREEN);
+                        }
+                        yield s("✓ ", GREEN) + e.title() + s("  já está atualizada.", DIM);
+                    } catch (IOException ex) {
+                        yield s("Erro: " + ex.getMessage(), RED);
+                    }
+                }
+
+                // sync — verifica tudo
+                List<FavoriteEntry> entries = store.list();
+                if (entries.isEmpty()) yield s("Biblioteca vazia.", YELLOW);
+
+                print(s("Sincronizando %d novel(s)...".formatted(entries.size()), CYAN));
+
+                var sb = new StringBuilder();
+                sb.append(s("Resultado:\n", BOLD));
+                sb.append(s("─".repeat(62) + "\n", DIM));
+
+                int updatedCount = 0;
+                for (int i = 0; i < entries.size(); i++) {
+                    FavoriteEntry e = entries.get(i);
+                    print(s("  Verificando: %s...".formatted(e.title()), DIM));
+                    try {
+                        int newChaps = service.checkForUpdates(e);
+                        if (newChaps > 0) {
+                            sb.append(s("  ✦ ", MAGENTA))
+                              .append(s(e.title(), BOLD))
+                              .append(s("  +%d novos capítulos".formatted(newChaps), GREEN))
+                              .append(s("  → update --favorite %d".formatted(i + 1), DIM))
+                              .append('\n');
+                            updatedCount++;
+                        } else {
+                            sb.append(s("  ✓ ", GREEN))
+                              .append(e.title())
+                              .append(s("  atualizada", DIM))
+                              .append('\n');
+                        }
+                    } catch (IOException ex) {
+                        sb.append(s("  ✗ ", RED))
+                          .append(e.title())
+                          .append(s("  erro: " + ex.getMessage(), RED))
+                          .append('\n');
+                    }
+                }
+                if (updatedCount == 0)
+                    sb.append('\n').append(s("Tudo atualizado!", GREEN));
+
+                yield sb.toString().stripTrailing();
+            }
+            default -> libraryUsage();
+        };
+    }
+
+    private String libraryUsage() {
+        return s("Uso: ", BOLD) + "library <ação>\n"
+                + s("  list      ", BOLD) + s("— lista a biblioteca\n", DIM)
+                + s("  add       ", BOLD) + s("— adiciona a novel atual\n", DIM)
+                + s("  remove N  ", BOLD) + s("— remove o item N\n", DIM)
+                + s("  sync      ", BOLD) + s("— verifica novos capítulos para toda a biblioteca\n", DIM)
+                + s("  sync N    ", BOLD) + s("— verifica novos capítulos para o item N", DIM);
+    }
+
     // ── Check updates ─────────────────────────────────────────────────────────
 
     @ShellMethod(key = "check-updates", value = "Check for new chapters in favorite novels")
@@ -320,6 +470,87 @@ public class NovelCommands {
         return sb.toString().stripTrailing();
     }
 
+    // ── Update (incremental download) ─────────────────────────────────────────
+
+    @ShellMethod(key = "update",
+                 value = "Download only new chapters (since last download) for the selected novel")
+    public String update(
+            @ShellOption(help = "Favorite number to load and update (omit to use current novel)",
+                         defaultValue = "0") int favorite,
+            @ShellOption(help = "Output format: pdf or epub", defaultValue = "epub")
+                    String format,
+            @ShellOption(help = "Output directory (default: ~/Downloads/hidarinovel)",
+                         defaultValue = "") String output) {
+
+        FavoritesStore store = service.getFavoritesStore();
+        FavoriteEntry entry  = null;
+
+        if (favorite > 0) {
+            var entryOpt = store.get(favorite);
+            if (entryOpt.isEmpty())
+                return s("Favorito #%d não encontrado.".formatted(favorite), YELLOW);
+
+            entry = entryOpt.get();
+            print(s("Carregando %s...".formatted(entry.title()), CYAN));
+            try {
+                service.selectNovelByFavorite(entry);
+            } catch (IOException e) {
+                return s("Erro ao carregar novel: " + e.getMessage(), RED);
+            }
+        } else if (service.getCurrentNovel().isEmpty()) {
+            return noNovelSelected();
+        } else {
+            String slug = service.getCurrentNovel().get().slug();
+            entry = store.getBySlug(slug).orElse(null);
+        }
+
+        int lastDownloaded = entry != null ? entry.lastDownloadedChapter() : 0;
+        List<Chapter> allChapters = service.getAllChapters();
+
+        if (allChapters.isEmpty())
+            return s("Nenhum capítulo carregado.", YELLOW);
+
+        List<Chapter> newChapters = allChapters.stream()
+                .filter(c -> c.globalNumber() > lastDownloaded)
+                .toList();
+
+        String novelTitle = service.getCurrentNovel().get().title();
+
+        if (newChapters.isEmpty()) {
+            return s("✓ ", GREEN) + novelTitle
+                    + s("  já está atualizada — nenhum capítulo novo.", DIM);
+        }
+
+        int firstNew = newChapters.getFirst().globalNumber();
+        int lastNew  = newChapters.getLast().globalNumber();
+
+        ExportFormat fmt;
+        try {
+            fmt = ExportFormat.fromString(format);
+        } catch (IllegalArgumentException e) {
+            return s(e.getMessage(), RED);
+        }
+
+        print(s("Baixando %d novo(s) capítulo(s) de %s (caps. %d–%d)..."
+                .formatted(newChapters.size(), novelTitle, firstNew, lastNew), CYAN));
+
+        Path outputDir = output.isBlank() ? null : Path.of(output);
+        try {
+            List<Path> created = service.download(firstNew, lastNew, fmt, true, outputDir,
+                    this::printProgressBar);
+
+            System.out.println(); // finaliza linha da barra de progresso
+            var sb = new StringBuilder();
+            sb.append(s("\n✓ Atualização concluída! ", GREEN))
+              .append("%d arquivo(s) gerado(s):\n".formatted(created.size()));
+            created.forEach(p -> sb.append("  ").append(p).append('\n'));
+            return sb.toString().stripTrailing();
+
+        } catch (IOException e) {
+            return s("Erro ao exportar: " + e.getMessage(), RED);
+        }
+    }
+
     // ── output-dir ────────────────────────────────────────────────────────────
 
     @ShellMethod(key = "output-dir", value = "Show or set the default output directory for downloads")
@@ -332,9 +563,7 @@ public class NovelCommands {
         }
 
         String newPath = String.join(" ", path).trim();
-        if (newPath.isBlank()) {
-            return s("Caminho inválido.", YELLOW);
-        }
+        if (newPath.isBlank()) return s("Caminho inválido.", YELLOW);
         service.setOutputDir(newPath);
         return s("✓ Diretório de saída definido para: ", GREEN) + s(newPath, BOLD);
     }
@@ -366,7 +595,6 @@ public class NovelCommands {
                     .orElse(s("Volume %d not found.".formatted(volume), YELLOW));
         }
 
-        // Show volume summary
         var sb = new StringBuilder();
         sb.append(s("Volumes (%d):\n".formatted(volumes.size()), BOLD));
         sb.append(s("─".repeat(62) + "\n", DIM));
@@ -403,8 +631,7 @@ public class NovelCommands {
                          defaultValue = "") String output) {
 
         if (service.getCurrentNovel().isEmpty()) return noNovelSelected();
-        if (from > to)
-            return s("--from must be ≤ --to.", YELLOW);
+        if (from > to) return s("--from must be ≤ --to.", YELLOW);
 
         ExportFormat fmt;
         try {
@@ -428,8 +655,9 @@ public class NovelCommands {
 
         try {
             List<Path> created = service.download(from, to, fmt, combine, outputDir,
-                    msg -> print(s(msg, DIM)));
+                    this::printProgressBar);
 
+            System.out.println(); // finaliza linha da barra de progresso
             var sb = new StringBuilder();
             sb.append(s("\n✓ Concluído! ", GREEN))
               .append("%d arquivo(s) gerado(s):\n".formatted(created.size()));
@@ -459,9 +687,8 @@ public class NovelCommands {
         try {
             if (volume.equalsIgnoreCase("all")) {
                 volFrom = 1;
-                volTo = service.getVolumes().size();
-                if (volTo == 0)
-                    return s("Nenhum volume carregado.", YELLOW);
+                volTo   = service.getVolumes().size();
+                if (volTo == 0) return s("Nenhum volume carregado.", YELLOW);
             } else if (volume.contains("-")) {
                 String[] parts = volume.split("-", 2);
                 volFrom = Integer.parseInt(parts[0].trim());
@@ -499,7 +726,8 @@ public class NovelCommands {
                 List<Path> created = service.download(
                         vol.firstGlobal(), vol.lastGlobal(),
                         fmt, true, outputDir,
-                        msg -> print(s(msg, DIM)));
+                        this::printProgressBar);
+                System.out.println(); // finaliza linha da barra de progresso
                 sb.append(s("✓ Livro %d: ".formatted(v), GREEN))
                   .append(created.getFirst()).append('\n');
                 downloaded++;
@@ -512,12 +740,91 @@ public class NovelCommands {
         return "\n" + sb.toString().stripTrailing();
     }
 
+    // ── read (terminal reader) ────────────────────────────────────────────────
+
+    @ShellMethod(key = "read", value = "Read a chapter directly in the terminal (paginated)")
+    public String read(
+            @ShellOption(help = "Chapter number (global)") int chapter) {
+
+        if (service.getCurrentNovel().isEmpty()) return noNovelSelected();
+        if (service.getAllChapters().isEmpty())
+            return s("Nenhum capítulo carregado. Use 'chapters' para ver os disponíveis.", YELLOW);
+
+        print(s("Carregando capítulo %d...".formatted(chapter), CYAN));
+
+        ChapterContent content;
+        try {
+            content = service.fetchChapterContent(chapter);
+        } catch (IllegalArgumentException e) {
+            return s(e.getMessage(), YELLOW);
+        } catch (IOException e) {
+            return s("Erro ao carregar capítulo: " + e.getMessage(), RED);
+        }
+
+        String novelTitle = service.getCurrentNovel().get().title();
+        int width  = Math.max(40, terminalWidth()  - 4);
+        int height = Math.max(8,  terminalHeight() - 6);
+
+        String plainText     = htmlToText(content.htmlBody());
+        List<String> lines   = wordWrap(plainText, width);
+        int totalPages = Math.max(1, (lines.size() + height - 1) / height);
+        int[] page = {0};
+
+        try {
+            Attributes saved = terminal.enterRawMode();
+            try {
+                while (true) {
+                    // Clear screen and render current page
+                    System.out.print("\033[2J\033[H");
+                    System.out.flush();
+
+                    String ruler = "━".repeat(Math.min(width, terminalWidth() - 1));
+                    System.out.println(s(ruler, DIM));
+                    System.out.println(s(content.fullTitle(), BOLD));
+                    System.out.println(s("  " + novelTitle
+                            + "  ·  Página %d/%d".formatted(page[0] + 1, totalPages), DIM));
+                    System.out.println(s(ruler, DIM));
+
+                    int start = page[0] * height;
+                    int end   = Math.min(start + height, lines.size());
+                    for (int i = start; i < end; i++) {
+                        System.out.println("  " + lines.get(i));
+                    }
+
+                    // Pad remaining lines so the status bar stays at the bottom
+                    for (int i = end - start; i < height; i++) System.out.println();
+
+                    System.out.println(s("─".repeat(Math.min(width, terminalWidth() - 1)), DIM));
+                    if (page[0] < totalPages - 1) {
+                        System.out.print(s(
+                                "[Espaço/Enter: próxima página  b: anterior  q: sair]", DIM));
+                    } else {
+                        System.out.print(s(
+                                "[Fim do capítulo  b: anterior  q: sair]", DIM));
+                    }
+                    System.out.flush();
+
+                    int key = terminal.reader().read();
+                    if (key == 'q' || key == 'Q' || key == 3 /* Ctrl+C */) break;
+                    if ((key == ' ' || key == '\r' || key == '\n') && page[0] < totalPages - 1)
+                        page[0]++;
+                    if ((key == 'b' || key == 'B') && page[0] > 0)
+                        page[0]--;
+                }
+            } finally {
+                terminal.setAttributes(saved);
+                System.out.print("\033[2J\033[H");
+                System.out.flush();
+            }
+        } catch (IOException e) {
+            return s("Erro no modo leitura: " + e.getMessage(), RED);
+        }
+
+        return s("✓ Leitura de \"" + content.title() + "\" finalizada.", GREEN);
+    }
+
     // ── Shared selection flow ─────────────────────────────────────────────────
 
-    /**
-     * Displays a numbered novel list and prompts for selection.
-     * On selection, loads the novel details and volumes.
-     */
     private String displayAndSelect(List<Novel> results) {
         var sb = new StringBuilder();
         for (int i = 0; i < results.size(); i++) {
@@ -549,9 +856,86 @@ public class NovelCommands {
         }
     }
 
+    // ── Progress bar ──────────────────────────────────────────────────────────
+
+    /**
+     * Renders an ASCII progress bar that overwrites the current terminal line.
+     * Called after each chapter is fetched during a download.
+     */
+    private void printProgressBar(int current, int total, String label) {
+        int termW  = terminalWidth();
+        int barW   = Math.min(30, termW / 3);
+        int filled = total > 0 ? (int) ((double) current / total * barW) : 0;
+        int empty  = barW - filled;
+        int pct    = total > 0 ? current * 100 / total : 0;
+
+        String bar  = "█".repeat(filled) + "░".repeat(empty);
+        int maxLabel = Math.max(10, termW - barW - 20);
+        String lbl  = label.length() > maxLabel
+                ? label.substring(0, maxLabel - 1) + "…"
+                : label;
+
+        String line = "  [%s] %3d%% (%d/%d) %s".formatted(bar, pct, current, total, lbl);
+        System.out.print("\r\033[K" + line);
+        System.out.flush();
+    }
+
+    // ── Reader helpers ────────────────────────────────────────────────────────
+
+    /** Converts HTML body to plain text, preserving paragraph structure. */
+    private String htmlToText(String html) {
+        Document doc = Jsoup.parseBodyFragment(html);
+        var sb = new StringBuilder();
+        for (Element block : doc.body().select("p, h1, h2, h3, h4, li")) {
+            String text = block.text().trim();
+            if (!text.isBlank()) sb.append(text).append("\n\n");
+        }
+        if (sb.isEmpty()) sb.append(doc.body().text());
+        return sb.toString().trim();
+    }
+
+    /** Word-wraps text to {@code width} columns, preserving paragraph breaks. */
+    private List<String> wordWrap(String text, int width) {
+        List<String> result = new ArrayList<>();
+        for (String paragraph : text.split("\n\n+")) {
+            if (paragraph.isBlank()) { result.add(""); continue; }
+            String[] words = paragraph.replaceAll("\\s+", " ").trim().split(" ");
+            var line = new StringBuilder();
+            for (String word : words) {
+                // Handle words longer than width
+                while (word.length() > width) {
+                    if (!line.isEmpty()) { result.add(line.toString()); line.setLength(0); }
+                    result.add(word.substring(0, width));
+                    word = word.substring(width);
+                }
+                if (!word.isEmpty()) {
+                    int needed = line.isEmpty() ? word.length() : line.length() + 1 + word.length();
+                    if (needed > width && !line.isEmpty()) {
+                        result.add(line.toString());
+                        line.setLength(0);
+                    }
+                    if (!line.isEmpty()) line.append(' ');
+                    line.append(word);
+                }
+            }
+            if (!line.isEmpty()) result.add(line.toString());
+            result.add(""); // paragraph break
+        }
+        return result;
+    }
+
+    private int terminalWidth() {
+        try { int w = terminal.getWidth(); return w > 0 ? w : 80; }
+        catch (Exception e) { return 80; }
+    }
+
+    private int terminalHeight() {
+        try { int h = terminal.getHeight(); return h > 0 ? h : 24; }
+        catch (Exception e) { return 24; }
+    }
+
     // ── Rendering helpers ─────────────────────────────────────────────────────
 
-    /** Compact card used after selection — shows key fields. */
     private String novelCard(Novel n) {
         var sb = new StringBuilder();
         sb.append(s("━".repeat(55) + "\n", DIM));
@@ -571,7 +955,6 @@ public class NovelCommands {
         return sb.toString();
     }
 
-    /** Full card used by the 'info' command — shows all metadata. */
     private String novelCardFull(Novel n) {
         var sb = new StringBuilder();
         sb.append(s("━".repeat(55) + "\n", DIM));
@@ -592,13 +975,11 @@ public class NovelCommands {
         if (n.favorites() > 0)       field(sb, "Favoritos",      String.valueOf(n.favorites()));
         if (!n.views().isBlank())     field(sb, "Visualizações",  n.views());
 
-        if (!n.genres().isEmpty()) {
+        if (!n.genres().isEmpty())
             field(sb, "Gêneros", String.join(", ", n.genres()));
-        }
 
         sb.append(s("━".repeat(55) + "\n", DIM));
 
-        // Synopsis
         if (!n.synopsis().isBlank()) {
             sb.append(s("Sinopse:\n", BOLD));
             sb.append(n.synopsis());
@@ -665,7 +1046,7 @@ public class NovelCommands {
 
     private static String siteName(String siteId) {
         return switch (siteId == null ? "" : siteId) {
-            case "hidarinovel"   -> "HidariNovel";
+            case "novelmania"   -> "NovelMania";
             case "novelsbr"     -> "Novels BR";
             case "centralnovel" -> "Central Novel";
             default             -> siteId;

@@ -40,11 +40,10 @@ public class NovelsBrScraper implements SiteScraperAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(NovelsBrScraper.class);
 
-    static final String BASE_URL   = "https://novels-br.com";
-    private static final String USER_AGENT =
-            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+    static final String BASE_URL    = "https://novels-br.com";
     private static final int TIMEOUT_MS = 20_000;
+
+    private final UserAgentProvider userAgentProvider;
 
     /** Max search result pages to fetch (site returns ~16 results/page). */
     private static final int MAX_SEARCH_PAGES = 5;
@@ -62,6 +61,10 @@ public class NovelsBrScraper implements SiteScraperAdapter {
     private final HttpClient httpClient = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
+
+    public NovelsBrScraper(UserAgentProvider userAgentProvider) {
+        this.userAgentProvider = userAgentProvider;
+    }
 
     @Override public String siteId()       { return "novelsbr"; }
     @Override public String displayName()  { return "Novels BR"; }
@@ -444,7 +447,7 @@ public class NovelsBrScraper implements SiteScraperAdapter {
 
     private Document fetch(String url) throws IOException {
         return Jsoup.connect(url)
-                .userAgent(USER_AGENT)
+                .userAgent(userAgentProvider.next())
                 .referrer(BASE_URL)
                 .timeout(TIMEOUT_MS)
                 .get();
@@ -453,7 +456,7 @@ public class NovelsBrScraper implements SiteScraperAdapter {
     private byte[] downloadBytes(String url, String referer)
             throws IOException, InterruptedException {
         HttpRequest req = HttpRequest.newBuilder(URI.create(url))
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", userAgentProvider.next())
                 .header("Referer", referer)
                 .build();
         HttpResponse<byte[]> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofByteArray());

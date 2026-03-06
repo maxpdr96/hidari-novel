@@ -50,10 +50,10 @@ public class NovelManiaScraper implements SiteScraperAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(NovelManiaScraper.class);
 
-    private static final String BASE_URL = "https://novelmania.com.br";
-    private static final String USER_AGENT = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            + "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-    private static final int TIMEOUT_MS = 20_000;
+    private static final String BASE_URL  = "https://novelmania.com.br";
+    private static final int    TIMEOUT_MS = 20_000;
+
+    private final UserAgentProvider userAgentProvider;
 
     // Known volume/book keywords → volume number (ignores year groupings like
     // "ano")
@@ -74,6 +74,10 @@ public class NovelManiaScraper implements SiteScraperAdapter {
     private final HttpClient httpClient = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
             .build();
+
+    public NovelManiaScraper(UserAgentProvider userAgentProvider) {
+        this.userAgentProvider = userAgentProvider;
+    }
 
     // ── Search ────────────────────────────────────────────────────────────────
 
@@ -407,7 +411,7 @@ public class NovelManiaScraper implements SiteScraperAdapter {
     private byte[] downloadBytes(String url, String referer)
             throws IOException, InterruptedException {
         HttpRequest request = HttpRequest.newBuilder(URI.create(url))
-                .header("User-Agent", USER_AGENT)
+                .header("User-Agent", userAgentProvider.next())
                 .header("Referer", referer)
                 .build();
         HttpResponse<byte[]> response = httpClient.send(request, HttpResponse.BodyHandlers.ofByteArray());
@@ -432,7 +436,7 @@ public class NovelManiaScraper implements SiteScraperAdapter {
 
     private Document fetch(String url) throws IOException {
         return Jsoup.connect(url)
-                .userAgent(USER_AGENT)
+                .userAgent(userAgentProvider.next())
                 .referrer(BASE_URL)
                 .timeout(TIMEOUT_MS)
                 .get();
