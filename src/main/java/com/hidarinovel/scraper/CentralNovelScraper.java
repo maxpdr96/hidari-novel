@@ -267,6 +267,8 @@ public class CentralNovelScraper implements SiteScraperAdapter {
                 List<Element> links = content.select("li a[href]").stream()
                         .filter(a -> !a.attr("href").contains("/pdf/"))
                         .collect(Collectors.toList());
+                // Site lists chapters newest-first; reverse to get ascending (cap 1, 2, 3…)
+                Collections.reverse(links);
                 if (!links.isEmpty()) raw.add(new RawVol(volNum, volTitle, links));
             }
 
@@ -297,9 +299,13 @@ public class CentralNovelScraper implements SiteScraperAdapter {
         } else {
             // Flat chapter list — no volume sections
             List<Chapter> chapters = new ArrayList<>();
-            for (Element a : doc.select(".eplister li a[href]")) {
+            List<Element> flatLinks = doc.select(".eplister li a[href]").stream()
+                    .filter(a -> !a.attr("href").contains("/pdf/"))
+                    .collect(Collectors.toList());
+            // Site lists chapters newest-first; reverse to get ascending (cap 1, 2, 3…)
+            Collections.reverse(flatLinks);
+            for (Element a : flatLinks) {
                 String href = a.attr("href");
-                if (href.contains("/pdf/")) continue;
                 String eplNum   = textOf(a.selectFirst(".epl-num"));
                 String eplTitle = textOf(a.selectFirst(".epl-title"));
                 String coordText = eplNum.isBlank() ? a.text().trim() : eplNum;
