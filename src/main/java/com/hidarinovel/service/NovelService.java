@@ -119,6 +119,9 @@ public class NovelService {
         return selectNovelByPartial(partial);
     }
 
+    public String getOutputDir()               { return defaultOutputDir; }
+    public void   setOutputDir(String path)    { this.defaultOutputDir = path; }
+
     public Optional<Novel>  getCurrentNovel()  { return Optional.ofNullable(currentNovel); }
     public List<Volume>     getVolumes()        { return volumes; }
     public List<Chapter>    getAllChapters()     { return allChapters; }

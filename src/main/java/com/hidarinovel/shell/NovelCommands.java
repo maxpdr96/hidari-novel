@@ -320,6 +320,25 @@ public class NovelCommands {
         return sb.toString().stripTrailing();
     }
 
+    // ── output-dir ────────────────────────────────────────────────────────────
+
+    @ShellMethod(key = "output-dir", value = "Show or set the default output directory for downloads")
+    public String outputDir(
+            @ShellOption(arity = -1, help = "New output directory path (omit to show current)",
+                         defaultValue = ShellOption.NULL) String[] path) {
+
+        if (path == null || path.length == 0) {
+            return s("Diretório de saída atual: ", DIM) + s(service.getOutputDir(), BOLD);
+        }
+
+        String newPath = String.join(" ", path).trim();
+        if (newPath.isBlank()) {
+            return s("Caminho inválido.", YELLOW);
+        }
+        service.setOutputDir(newPath);
+        return s("✓ Diretório de saída definido para: ", GREEN) + s(newPath, BOLD);
+    }
+
     // ── info ──────────────────────────────────────────────────────────────────
 
     @ShellMethod(key = "info", value = "Show detailed info about the currently selected novel")
