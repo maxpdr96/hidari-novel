@@ -18,6 +18,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Central service managing interactive session state and orchestrating
@@ -264,17 +268,41 @@ public class NovelService {
 
     // ── Private helpers ───────────────────────────────────────────────────────
 
+    private static final int PARALLEL_DOWNLOADS = 2;
+
     private List<ChapterContent> fetchContents(List<Chapter> chapters,
                                                ProgressCallback progress) {
-        List<ChapterContent> contents = new ArrayList<>();
-        for (Chapter ch : chapters) {
-            int current = contents.size() + 1;
-            progress.update(current, chapters.size(), ch.shortLabel());
-            try {
-                contents.add(currentScraper.getChapterContent(ch));
-            } catch (IOException e) {
-                log.error("Failed to fetch {}: {}", ch.url(), e.getMessage());
+        ChapterContent[] results = new ChapterContent[chapters.size()];
+        AtomicInteger completed = new AtomicInteger(0);
+        ExecutorService pool = Executors.newFixedThreadPool(PARALLEL_DOWNLOADS);
+
+        try {
+            List<CompletableFuture<Void>> futures = new ArrayList<>();
+            for (int i = 0; i < chapters.size(); i++) {
+                final int idx = i;
+                final Chapter ch = chapters.get(i);
+                futures.add(CompletableFuture.runAsync(() -> {
+                    try {
+                        ChapterContent content = currentScraper.getChapterContent(ch);
+                        results[idx] = content;
+                    } catch (IOException e) {
+                        log.error("Failed to fetch {}: {}", ch.url(), e.getMessage());
+                    } finally {
+                        int done = completed.incrementAndGet();
+                        synchronized (progress) {
+                            progress.update(done, chapters.size(), ch.shortLabel());
+                        }
+                    }
+                }, pool));
             }
+            CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
+        } finally {
+            pool.shutdown();
+        }
+
+        List<ChapterContent> contents = new ArrayList<>();
+        for (ChapterContent c : results) {
+            if (c != null) contents.add(c);
         }
         return contents;
     }

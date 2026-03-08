@@ -5,6 +5,7 @@ import com.hidarinovel.model.ChapterContent;
 import com.hidarinovel.model.Novel;
 import com.hidarinovel.model.SearchFilter;
 import com.hidarinovel.model.Volume;
+import org.jsoup.Connection;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
@@ -16,11 +17,15 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.net.CookieManager;
+import java.net.CookiePolicy;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.text.Normalizer;
+import java.time.Duration;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -60,7 +65,11 @@ public class NovelsBrScraper implements SiteScraperAdapter {
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .followRedirects(HttpClient.Redirect.NORMAL)
+            .cookieHandler(new CookieManager(null, CookiePolicy.ACCEPT_ALL))
+            .connectTimeout(Duration.ofMillis(TIMEOUT_MS))
             .build();
+    private final Object warmupLock = new Object();
+    private volatile boolean sessionWarmed;
 
     public NovelsBrScraper(UserAgentProvider userAgentProvider) {
         this.userAgentProvider = userAgentProvider;
@@ -79,13 +88,22 @@ public class NovelsBrScraper implements SiteScraperAdapter {
     @Override
     public List<Novel> search(String query, SearchFilter filter) throws IOException {
         List<Novel> results = new ArrayList<>();
+        String encoded = java.net.URLEncoder.encode(query.trim(), StandardCharsets.UTF_8);
+        String queryNorm = normalize(query);
 
         for (int page = 0; page < MAX_SEARCH_PAGES; page++) {
-            String url = BASE_URL + "/novels?simplifiedField="
-                    + java.net.URLEncoder.encode(query.trim(), StandardCharsets.UTF_8)
-                    + "&page=" + page;
-            log.debug("Novels BR search page {}: {}", page, url);
-            Document doc = fetch(url);
+            String url = BASE_URL + "/novels?simplifiedField=" + encoded + "&page=" + page;
+            log.debug("Novels BR search (simplifiedField) page {}: {}", page, url);
+            Document doc;
+            try {
+                doc = fetch(url);
+            } catch (IOException e) {
+                if (isForbidden(e)) {
+                    log.warn("Novels BR blocked simplifiedField with 403; using listing fallback for '{}'", query);
+                    return searchViaListingFallback(queryNorm);
+                }
+                throw e;
+            }
 
             List<Novel> pageNovels = parseSearchResultPage(doc);
             if (pageNovels.isEmpty()) break; // no more results
@@ -95,6 +113,66 @@ public class NovelsBrScraper implements SiteScraperAdapter {
 
         log.debug("Novels BR search '{}': {} result(s)", query, results.size());
         return results;
+    }
+
+    private List<Novel> searchViaListingFallback(String queryNorm) throws IOException {
+        List<Novel> results = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+
+        for (int page = 0; page < MAX_SEARCH_PAGES; page++) {
+            Document doc = fetchListingPage(page);
+            List<Novel> pageNovels = parseSearchResultPage(doc);
+            if (pageNovels.isEmpty()) break;
+
+            for (Novel novel : pageNovels) {
+                if (queryNorm.isBlank() || matchesQuery(novel, queryNorm)) {
+                    if (seen.add(novel.slug())) {
+                        results.add(novel);
+                    }
+                }
+            }
+        }
+        return results;
+    }
+
+    private Document fetchListingPage(int page) throws IOException {
+        List<String> candidates = new ArrayList<>();
+        if (page == 0) {
+            candidates.add(BASE_URL + "/novels");
+            candidates.add(BASE_URL + "/novels/");
+        }
+        candidates.add(BASE_URL + "/novels?page=" + page);
+        candidates.add(BASE_URL + "/novels/?page=" + page);
+
+        IOException lastError = null;
+        for (String url : candidates) {
+            try {
+                log.debug("Novels BR listing fallback page {} candidate: {}", page, url);
+                return fetch(url);
+            } catch (IOException e) {
+                lastError = e;
+                if (!isForbidden(e)) throw e;
+            }
+        }
+        if (lastError != null) throw lastError;
+        throw new IOException("Could not fetch Novels BR listing page " + page);
+    }
+
+    private static boolean matchesQuery(Novel novel, String queryNorm) {
+        return normalize(novel.title()).contains(queryNorm)
+                || normalize(novel.slug().replace('-', ' ')).contains(queryNorm);
+    }
+
+    private static String normalize(String text) {
+        if (text == null) return "";
+        String nfd = Normalizer.normalize(text, Normalizer.Form.NFD);
+        return nfd.replaceAll("\\p{M}+", "")
+                .toLowerCase(Locale.ROOT)
+                .trim();
+    }
+
+    private static boolean isForbidden(IOException e) {
+        return e.getMessage() != null && e.getMessage().contains("HTTP 403");
     }
 
     /**
@@ -446,11 +524,88 @@ public class NovelsBrScraper implements SiteScraperAdapter {
     // ── HTTP utilities ────────────────────────────────────────────────────────
 
     private Document fetch(String url) throws IOException {
-        return Jsoup.connect(url)
+        IOException lastError = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            ensureWarmSession(attempt > 1);
+            HttpRequest req = HttpRequest.newBuilder(URI.create(url))
+                    .timeout(Duration.ofMillis(TIMEOUT_MS))
+                    .header("User-Agent", userAgentProvider.next())
+                    .header("Referer", BASE_URL + "/novels")
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                    .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+                    .header("Accept-Encoding", "gzip, deflate, br")
+                    .header("Upgrade-Insecure-Requests", "1")
+                    .header("Cache-Control", "max-age=0")
+                    .header("Sec-Fetch-Dest", "document")
+                    .header("Sec-Fetch-Mode", "navigate")
+                    .header("Sec-Fetch-Site", "same-origin")
+                    .header("Sec-Fetch-User", "?1")
+                    .GET()
+                    .build();
+            try {
+                HttpResponse<String> resp = httpClient.send(req, HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
+                if (resp.statusCode() == 403) {
+                    try {
+                        return fetchWithJsoup(url);
+                    } catch (IOException jsoupErr) {
+                        lastError = jsoupErr;
+                        sessionWarmed = false;
+                        continue;
+                    }
+                }
+                if (resp.statusCode() >= 400)
+                    throw new IOException("HTTP " + resp.statusCode() + " for " + url);
+                return Jsoup.parse(resp.body(), url);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while fetching " + url, e);
+            } catch (IOException e) {
+                lastError = e;
+                if (attempt == 2) throw e;
+            }
+        }
+
+        if (lastError != null) throw lastError;
+        throw new IOException("Failed to fetch " + url);
+    }
+
+    private Document fetchWithJsoup(String url) throws IOException {
+        Connection.Response resp = Jsoup.connect(url)
                 .userAgent(userAgentProvider.next())
-                .referrer(BASE_URL)
+                .referrer(BASE_URL + "/novels")
                 .timeout(TIMEOUT_MS)
-                .get();
+                .ignoreHttpErrors(true)
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+                .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+                .header("Accept-Encoding", "gzip, deflate, br")
+                .header("Upgrade-Insecure-Requests", "1")
+                .header("Cache-Control", "max-age=0")
+                .method(Connection.Method.GET)
+                .execute();
+        if (resp.statusCode() >= 400)
+            throw new IOException("HTTP " + resp.statusCode() + " for " + url);
+        return resp.parse();
+    }
+
+    private void ensureWarmSession(boolean force) {
+        if (!force && sessionWarmed) return;
+        synchronized (warmupLock) {
+            if (!force && sessionWarmed) return;
+            HttpRequest req = HttpRequest.newBuilder(URI.create(BASE_URL))
+                    .timeout(Duration.ofMillis(TIMEOUT_MS))
+                    .header("User-Agent", userAgentProvider.next())
+                    .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    .header("Accept-Language", "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7")
+                    .GET()
+                    .build();
+            try {
+                HttpResponse<Void> resp = httpClient.send(req, HttpResponse.BodyHandlers.discarding());
+                sessionWarmed = resp.statusCode() < 500;
+            } catch (Exception e) {
+                sessionWarmed = false;
+                log.debug("Warm-up request failed for Novels BR: {}", e.getMessage());
+            }
+        }
     }
 
     private byte[] downloadBytes(String url, String referer)
